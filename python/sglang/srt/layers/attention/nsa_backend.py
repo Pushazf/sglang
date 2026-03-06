@@ -16,10 +16,6 @@ from sglang.srt.layers.attention.nsa.nsa_backend_mtp_precompute import (
     compute_cu_seqlens,
 )
 from sglang.srt.layers.attention.nsa.nsa_indexer import BaseIndexerMetadata
-from sglang.srt.layers.attention.nsa.nsa_mtp_verification import (
-    verify_multi_backend_fused_metadata_copy,
-    verify_single_backend_fused_metadata_copy,
-)
 from sglang.srt.layers.attention.nsa.quant_k_cache import quantize_k_cache
 from sglang.srt.layers.attention.nsa.transform_index import (
     transform_index_page_table_decode,
@@ -73,14 +69,9 @@ else:
 # Reuse this workspace buffer across all NSA backend instances
 global_workspace_buffer = None
 
-# Control whether to use fused metadata copy kernel (default: enabled)
+# Control whether to use fused metadata copy kernel for cuda graph replay (default: enabled)
 # Set SGLANG_USE_FUSED_METADATA_COPY=0 or false to disable
 _USE_FUSED_METADATA_COPY = envs.SGLANG_USE_FUSED_METADATA_COPY.get() and not _is_hip
-
-# Control whether to verify fused metadata copy against individual copies (default: disabled)
-# Set SGLANG_VERIFY_FUSED_METADATA_COPY=1 or true to enable verification
-# This will crash with detailed error message if any inconsistency is detected
-_VERIFY_FUSED_METADATA_COPY = envs.SGLANG_VERIFY_FUSED_METADATA_COPY.get()
 
 
 @dataclass(frozen=True)
@@ -319,8 +310,6 @@ class NativeSparseAttnBackend(
         self.req_to_token = model_runner.req_to_token_pool.req_to_token
 
         self.use_mha: bool = False
-        # Force NSA prefill to use MLA (i.e. disable MHA_ONE_SHOT), controlled by env var.
-        self._force_attn_forward_mla: bool = envs.SGLANG_NSA_FORCE_MLA.get()
         self.nsa_prefill_impl: _NSA_IMPL_T = (
             model_runner.server_args.nsa_prefill_backend
         )
@@ -1182,18 +1171,6 @@ class NativeSparseAttnBackend(
                 # Successfully used fused kernel
                 fused_kernel_succeeded = True
 
-                # Verification: compare fused kernel results against individual copies
-                if _VERIFY_FUSED_METADATA_COPY:
-                    verify_single_backend_fused_metadata_copy(
-                        metadata=metadata,
-                        precomputed=precomputed,
-                        forward_mode=forward_mode,
-                        bs=bs,
-                        flashmla_num_splits_src=flashmla_num_splits_src,
-                        flashmla_metadata_src=flashmla_metadata_src,
-                        flashmla_num_splits_dst=flashmla_num_splits_dst,
-                        flashmla_metadata_dst=flashmla_metadata_dst,
-                    )
             except ImportError:
                 print(
                     "Warning: Fused metadata copy kernel not available, falling back to individual copies."
@@ -2082,8 +2059,6 @@ class NativeSparseAttnBackend(
             )
         else:
             self.use_mha = False  # Decode/verify always use MLA
-        if self._force_attn_forward_mla:
-            self.use_mha = False
 
         # Set MLA implementation only if not using MHA
         if not self.use_mha and self.enable_auto_select_prefill_impl:
@@ -2308,18 +2283,6 @@ class NativeSparseAttnMultiStepBackend:
                         precomputed.max_len,
                         precomputed.seqlens_expanded_size,
                     )
-
-                    # Verification: compare fused kernel results against individual copies
-                    if _VERIFY_FUSED_METADATA_COPY:
-                        verify_multi_backend_fused_metadata_copy(
-                            metadata0=metadata0,
-                            metadata1=metadata1,
-                            metadata2=metadata2,
-                            precomputed=precomputed,
-                            bs=bs,
-                            flashmla_num_splits_src=flashmla_num_splits_src,
-                            flashmla_metadata_src=flashmla_metadata_src,
-                        )
 
                     # Copy remaining backends one by one (if > 3 backends)
                     for i in range(3, self.speculative_num_steps - 1):
