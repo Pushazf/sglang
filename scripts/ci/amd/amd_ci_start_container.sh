@@ -223,6 +223,7 @@ else
 fi
 
 echo "Launching container: ci_sglang"
+# /sglang-checkout/python: explicit fallback to avoid PEP 660 finder fragility on bind mounts
 docker run -dt --user root --device=/dev/kfd ${DEVICE_FLAG} \
   --ulimit nofile=65536:65536 \
   -v "${GITHUB_WORKSPACE:-$PWD}:/sglang-checkout" \
@@ -236,7 +237,7 @@ docker run -dt --user root --device=/dev/kfd ${DEVICE_FLAG} \
   -e HF_HUB_DOWNLOAD_TIMEOUT=300 \
   -e MIOPEN_USER_DB_PATH=/sgl-data/miopen-cache \
   -e MIOPEN_CUSTOM_CACHE_DIR=/sgl-data/miopen-cache \
-  -e PYTHONPATH="/opt/tilelang:${PYTHONPATH:-}" \
+  -e PYTHONPATH="/sglang-checkout/python:/opt/tilelang:${PYTHONPATH:-}" \
   --security-opt seccomp=unconfined \
   -w /sglang-checkout \
   --name ci_sglang \
