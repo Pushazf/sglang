@@ -166,6 +166,11 @@ class DFlashVerifyInput(SpecInput):
     # Shape info for padding (e.g., DP attention / CUDA graph).
     num_tokens_per_batch: int = -1
 
+    # Sliding window: per-request start offset into req_to_token for draft KV attention.
+    # When set, the Triton kernel reads from req_to_token[req_idx, kv_start_idx[i]:]
+    # instead of from column 0, so draft attention only covers the recent window.
+    kv_start_idx: torch.Tensor | None = None
+
     def __post_init__(self):
         super().__init__(spec_input_type=SpecInputType.DFLASH_VERIFY)
         if self.num_tokens_per_batch == -1:
@@ -281,7 +286,7 @@ class DFlashVerifyInput(SpecInput):
             req_pool_indices,
             paged_kernel_lens,
             cum_kv_seq_len,
-            None,
+            self.kv_start_idx,
             kv_indices,
             req_to_token.size(1),
         )

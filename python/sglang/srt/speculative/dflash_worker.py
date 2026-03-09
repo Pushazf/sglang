@@ -73,6 +73,9 @@ class DFlashWorker:
         self.target_worker = target_worker
         self.model_runner = target_worker.model_runner
         self.page_size = server_args.page_size
+        self.draft_window_size: Optional[int] = (
+            server_args.speculative_dflash_draft_window_size
+        )
         self.device = target_worker.device
 
         self._warned_sampling_fallback = False
@@ -106,6 +109,8 @@ class DFlashWorker:
                 draft_backend,
             )
             draft_backend = "flashinfer"
+
+        self.draft_backend = draft_backend
 
         # Make the draft worker backend explicit and self-contained (no further overrides).
         draft_server_args.speculative_draft_attention_backend = None
@@ -462,6 +467,16 @@ class DFlashWorker:
         # prefix before drafting the next block.
         prefix_lens = batch.seq_lens  # int32, device
 
+        # Sliding window: draft attention only sees the most recent W prefix tokens.
+        # Positions (for RoPE) always use absolute indices regardless of window.
+        if self.draft_window_size is not None and self.draft_backend == "flashinfer":
+            W = self.draft_window_size
+            draft_prefix_lens = torch.clamp(prefix_lens, max=W)
+            draft_kv_start = (prefix_lens - draft_prefix_lens).to(torch.int32)
+        else:
+            draft_prefix_lens = prefix_lens
+            draft_kv_start = None
+
         positions_2d = self._draft_block_positions_buf[:bs]
         torch.add(prefix_lens.unsqueeze(1), self._block_pos_offsets, out=positions_2d)
         positions = positions_2d.reshape(-1)
@@ -471,7 +486,11 @@ class DFlashWorker:
         torch.add(block_start, int(self.block_size), out=block_end)
 
         seq_lens_cpu = self._draft_seq_lens_cpu_buf[:bs]
-        if batch.seq_lens_cpu.dtype == torch.int32:
+        if self.draft_window_size is not None and self.draft_backend == "flashinfer":
+            seq_lens_cpu.copy_(
+                torch.clamp(batch.seq_lens_cpu.to(torch.int32), max=self.draft_window_size)
+            )
+        elif batch.seq_lens_cpu.dtype == torch.int32:
             seq_lens_cpu.copy_(batch.seq_lens_cpu)
         else:
             seq_lens_cpu.copy_(batch.seq_lens_cpu.to(torch.int32))
@@ -513,8 +532,9 @@ class DFlashWorker:
             # In this mode, `seq_lens` stores the prefix lengths; attention backends
             # derive kv_len by adding `draft_token_num`.
             draft_spec_info = self._draft_block_spec_info
-            seq_lens = prefix_lens
-            seq_lens_sum = int(batch.seq_lens_sum)
+            draft_spec_info.kv_start_idx = draft_kv_start
+            seq_lens = draft_prefix_lens
+            seq_lens_sum = int(draft_prefix_lens.sum())
             forward_batch = ForwardBatch(
                 forward_mode=ForwardMode.TARGET_VERIFY,
                 batch_size=bs,

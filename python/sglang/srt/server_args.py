@@ -485,6 +485,7 @@ class ServerArgs:
     speculative_eagle_topk: Optional[int] = None
     speculative_num_draft_tokens: Optional[int] = None
     speculative_dflash_block_size: Optional[int] = None
+    speculative_dflash_draft_window_size: Optional[int] = None
     speculative_accept_threshold_single: float = 1.0
     speculative_accept_threshold_acc: float = 1.0
     speculative_token_map: Optional[str] = None
@@ -2738,6 +2739,21 @@ class ServerArgs:
                     self.speculative_dflash_block_size
                 )
 
+            if self.speculative_dflash_draft_window_size is not None:
+                w = int(self.speculative_dflash_draft_window_size)
+                if w <= 0:
+                    raise ValueError(
+                        "DFLASH requires --speculative-dflash-draft-window-size "
+                        f"to be positive, got {w}."
+                    )
+                draft_tokens = self.speculative_num_draft_tokens or 0
+                if draft_tokens > 0 and w < draft_tokens:
+                    raise ValueError(
+                        "DFLASH --speculative-dflash-draft-window-size must be >= "
+                        "--speculative-num-draft-tokens (block_size). "
+                        f"window_size={w}, block_size={draft_tokens}."
+                    )
+
             if self.speculative_num_draft_tokens is None:
                 from sglang.srt.speculative.dflash_utils import (
                     parse_dflash_draft_config,
@@ -4479,6 +4495,14 @@ class ServerArgs:
             type=int,
             help="DFLASH only. Block size (verify window length). Alias of --speculative-num-draft-tokens for DFLASH.",
             default=ServerArgs.speculative_dflash_block_size,
+        )
+        parser.add_argument(
+            "--speculative-dflash-draft-window-size",
+            type=int,
+            help="DFLASH only. Sliding window size for draft KV attention. "
+            "Draft model only attends to the most recent W target tokens. "
+            "None (default) means full context (no window).",
+            default=ServerArgs.speculative_dflash_draft_window_size,
         )
         parser.add_argument(
             "--speculative-accept-threshold-single",
