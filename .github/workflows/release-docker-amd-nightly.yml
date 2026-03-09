@@ -54,18 +54,28 @@ jobs:
           echo "Detected version: ${VERSION}"
           echo "Pretend version for pip: ${PRETEND_VERSION}"
 
-      - name: Login to Docker Hub
+      - name: Login to Docker Hub (AMD)
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
           password: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
-      - name: Build and Push
+      - name: Pull and retag
         run: |
           docker pull rocm/sgl-dev:v0.5.9-rocm700-mi30x-20260308
           docker tag rocm/sgl-dev:v0.5.9-rocm700-mi30x-20260308 lmsysorg/sglang-daily:v0.5.9-rocm700-mi30x-20260308
-          docker push rocm/sgl-dev:v0.5.9-rocm700-mi30x-20260308
-          docker push lmsysorg/sglang-daily:v0.5.9-rocm700-mi30x-20260308
+
+      - name: Push to rocm/sgl-dev
+        run: docker push rocm/sgl-dev:v0.5.9-rocm700-mi30x-20260308
+
+      - name: Login to Docker Hub (lmsys)
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push to lmsysorg/sglang-daily
+        run: docker push lmsysorg/sglang-daily:v0.5.9-rocm700-mi30x-20260308
 
   # Temporarily disable docker cache seeding until performant storage is in place
   cache:
