@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        gpu_arch: ['gfx942', 'gfx950']
+        gpu_arch: ['gfx942']
         build_type: ['all']
     steps:
       - name: Checkout repository
@@ -62,26 +62,10 @@ jobs:
 
       - name: Build and Push
         run: |
-          version=${{ steps.version.outputs.version }}
-          pretend_version=${{ steps.version.outputs.pretend_version }}
-          echo "Version: ${version}"
-          echo "Pretend version: ${pretend_version}"
-
-          if [ "${{ matrix.gpu_arch }}" = "gfx942" ]; then
-            rocm_tag="rocm700-mi30x"
-          elif [ "${{ matrix.gpu_arch }}" = "gfx950" ]; then
-            rocm_tag="rocm700-mi35x"
-          else
-            echo "Unsupported gfx arch"
-            exit 1
-          fi
-
-          tag=v${version}-${rocm_tag}
-
-          docker build . -f docker/rocm.Dockerfile --build-arg SGL_BRANCH=${{ github.ref_name }} --build-arg BUILD_TYPE=${{ matrix.build_type }} --build-arg GPU_ARCH=${{ matrix.gpu_arch }} --build-arg ENABLE_MORI=1 --build-arg NIC_BACKEND=ainic --build-arg SETUPTOOLS_SCM_PRETEND_VERSION=${pretend_version} -t rocm/sgl-dev:${tag}-${{ env.DATE }} --no-cache
-          docker tag rocm/sgl-dev:${tag}-${{ env.DATE }} lmsysorg/sglang-daily:${tag}-${{ env.DATE }}
-          docker push rocm/sgl-dev:${tag}-${{ env.DATE }}
-          docker push lmsysorg/sglang-daily:${tag}-${{ env.DATE }}
+          docker pull rocm/sgl-dev:v0.5.9-rocm700-mi30x-20260308
+          docker tag rocm/sgl-dev:v0.5.9-rocm700-mi30x-20260308 lmsysorg/sglang-daily:v0.5.9-rocm700-mi30x-20260308
+          docker push rocm/sgl-dev:v0.5.9-rocm700-mi30x-20260308
+          docker push lmsysorg/sglang-daily:v0.5.9-rocm700-mi30x-20260308
 
   # Temporarily disable docker cache seeding until performant storage is in place
   cache:
