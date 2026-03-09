@@ -79,4 +79,6 @@ jobs:
           tag=v${version}-${rocm_tag}
 
           docker build . -f docker/rocm.Dockerfile --build-arg SGL_BRANCH=${{ github.ref_name }} --build-arg BUILD_TYPE=${{ matrix.build_type }} --build-arg GPU_ARCH=${{ matrix.gpu_arch }} --build-arg ENABLE_MORI=1 --build-arg NIC_BACKEND=ainic --build-arg SETUPTOOLS_SCM_PRETEND_VERSION=${pretend_version} -t rocm/sgl-dev:${tag}-${{ env.DATE }} --no-cache
+          docker tag rocm/sgl-dev:${tag}-${{ env.DATE }} lmsysorg/sglang-daily:${tag}-${{ env.DATE }}
           docker push rocm/sgl-dev:${tag}-${{ env.DATE }}
+          docker push lmsysorg/sglang-daily:${tag}-${{ env.DATE }}
