@@ -330,6 +330,15 @@ def _build_mode_runs(
                     if args.speculative_draft_attention_backend
                     else []
                 ),
+                *(
+                    [
+                        "--speculative-dflash-recycle",
+                        "--speculative-dflash-recycle-confidence",
+                        str(args.speculative_dflash_recycle_confidence),
+                    ]
+                    if args.speculative_dflash_recycle
+                    else []
+                ),
             ],
             True,
         )
@@ -446,6 +455,26 @@ def _run_mode_for_backend_tp(
             pass
 
 
+def _format_md_table(
+    *,
+    tp_sizes: list[int],
+    concurrencies: list[int],
+    values: dict[tuple[int, int], Optional[float]],
+    float_fmt: str,
+) -> str:
+    header = ["tp\\conc"] + [str(c) for c in concurrencies]
+    lines: list[str] = []
+    lines.append("| " + " | ".join(header) + " |")
+    lines.append("| " + " | ".join("---" for _ in header) + " |")
+    for tp in tp_sizes:
+        row = [str(tp)]
+        for c in concurrencies:
+            v = values.get((tp, c), None)
+            row.append("N/A" if v is None else format(v, float_fmt))
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
 def _print_summary(
     *,
     args: argparse.Namespace,
@@ -455,31 +484,45 @@ def _print_summary(
     device_sm: int,
     results: dict[tuple[str, int, int, str], BenchMetrics],
 ) -> None:
+    md_lines: list[str] = []
+
     print("\n=== DFLASH GSM8K Sweep Summary ===")
-    _print_kv_lines(
-        [
-            ("target_model", args.target_model),
-            ("draft_model", args.draft_model),
-            ("max_new_tokens", args.max_new_tokens),
-            (
-                "sampling",
-                f"temperature:{args.temperature}, top_p:{args.top_p}, top_k:{args.top_k}",
-            ),
-            ("attention_backends", ",".join(attention_backends)),
-            (
-                "speculative_draft_attention_backend",
-                args.speculative_draft_attention_backend,
-            ),
-            ("tp_sizes", ",".join(str(x) for x in tp_sizes)),
-            ("concurrencies", ",".join(str(x) for x in concurrencies)),
-            (
-                "questions_per_concurrency_base",
-                args.questions_per_concurrency_base,
-            ),
-            ("device_sm", device_sm),
-            ("skip_baseline", bool(args.skip_baseline)),
-        ]
-    )
+    md_lines.append("# DFLASH GSM8K Sweep Summary")
+    md_lines.append("")
+
+    kv_items = [
+        ("target_model", args.target_model),
+        ("draft_model", args.draft_model),
+        ("max_new_tokens", args.max_new_tokens),
+        (
+            "sampling",
+            f"temperature:{args.temperature}, top_p:{args.top_p}, top_k:{args.top_k}",
+        ),
+        ("attention_backends", ",".join(attention_backends)),
+        (
+            "speculative_draft_attention_backend",
+            args.speculative_draft_attention_backend,
+        ),
+        ("tp_sizes", ",".join(str(x) for x in tp_sizes)),
+        ("concurrencies", ",".join(str(x) for x in concurrencies)),
+        (
+            "questions_per_concurrency_base",
+            args.questions_per_concurrency_base,
+        ),
+        ("device_sm", device_sm),
+        ("skip_baseline", bool(args.skip_baseline)),
+        ("speculative_dflash_recycle", bool(args.speculative_dflash_recycle)),
+        (
+            "speculative_dflash_recycle_confidence",
+            args.speculative_dflash_recycle_confidence
+            if args.speculative_dflash_recycle
+            else None,
+        ),
+    ]
+    _print_kv_lines(kv_items)
+    for key, value in kv_items:
+        md_lines.append(f"- **{key}**: `{value}`")
+    md_lines.append("")
 
     section_fields = [
         ("Baseline output tok/s", "baseline", "output_toks_per_s", ",.2f"),
@@ -496,6 +539,9 @@ def _print_summary(
 
     for backend in attention_backends:
         print(f"\n=== Backend: {backend} ===")
+        md_lines.append(f"## Backend: {backend}")
+        md_lines.append("")
+
         metrics_map = {
             (mode, field): _collect_metric(
                 results=results,
@@ -533,6 +579,26 @@ def _print_summary(
                     float_fmt=fmt,
                 )
             )
+            md_lines.append(f"### {title}")
+            md_lines.append("")
+            md_lines.append(
+                _format_md_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values=values,
+                    float_fmt=fmt,
+                )
+            )
+            md_lines.append("")
+
+    if args.output_md:
+        output_dir = os.path.dirname(args.output_md)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        with open(args.output_md, "w", encoding="utf-8") as f:
+            f.write("\n".join(md_lines))
+            f.write("\n")
+        print(f"\nWrote markdown report to: {args.output_md}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -597,6 +663,22 @@ def parse_args() -> argparse.Namespace:
         "--speculative-draft-attention-backend",
         default=None,
         help="Optional server --speculative-draft-attention-backend override for DFLASH runs.",
+    )
+    parser.add_argument(
+        "--speculative-dflash-recycle",
+        action="store_true",
+        help="Enable recycle mode for DFLASH speculative decoding.",
+    )
+    parser.add_argument(
+        "--speculative-dflash-recycle-confidence",
+        type=float,
+        default=0.8,
+        help="Confidence threshold for recycling draft tokens (default: 0.8).",
+    )
+    parser.add_argument(
+        "--output-md",
+        default=None,
+        help="Path to write a markdown report. If unset, no file is written.",
     )
     return parser.parse_args()
 

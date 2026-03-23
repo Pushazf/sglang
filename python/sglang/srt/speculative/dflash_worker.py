@@ -179,6 +179,15 @@ class DFlashWorker:
                 self._mask_token_id_override,
             )
 
+        # Recycle configuration.
+        self.recycle_enabled = server_args.speculative_dflash_recycle
+        self.confidence_threshold = server_args.speculative_dflash_recycle_confidence
+        if self.recycle_enabled and self.tp_rank == 0:
+            logger.info(
+                "DFLASH recycle enabled. confidence_threshold=%.3f",
+                self.confidence_threshold,
+            )
+
         self._block_pos_offsets = torch.arange(
             self.block_size, device=self.device, dtype=torch.int64
         )
@@ -460,6 +469,36 @@ class DFlashWorker:
         block_ids.fill_(int(self._mask_token_id))
         block_ids[:, 0].copy_(draft_input.verified_id.to(torch.long))
 
+        # --- Recycle: fill high-confidence tokens from previous round ---
+        if self.recycle_enabled and draft_input.prev_draft_tokens is not None:
+            prev_tokens = draft_input.prev_draft_tokens[:bs]  # [bs, block_size]
+            prev_conf = draft_input.prev_confidences[:bs]  # [bs, block_size-1]
+            prev_acc = draft_input.prev_accept_len[:bs]  # [bs]
+
+            reject_pos = prev_acc + 1  # [bs]
+            first_pos = self._block_pos_offsets  # [block_size]
+
+            # Map first-block position p to second-block position p - reject_pos.
+            second_pos = first_pos.unsqueeze(0) - reject_pos.unsqueeze(1)  # [bs, block_size]
+
+            # Build full confidence: position 0 is anchor (set to 0, never recycled).
+            full_conf = torch.zeros(
+                bs, self.block_size, device=self.device, dtype=prev_conf.dtype
+            )
+            full_conf[:, 1:] = prev_conf
+
+            recycle_mask = (
+                (first_pos.unsqueeze(0) > reject_pos.unsqueeze(1))
+                & (full_conf > self.confidence_threshold)
+                & (second_pos >= 1)
+                & (second_pos < self.block_size)
+            )
+
+            row_idx, col_idx = recycle_mask.nonzero(as_tuple=True)
+            if row_idx.numel() > 0:
+                target_col = second_pos[row_idx, col_idx].long()
+                block_ids[row_idx, target_col] = prev_tokens[row_idx, col_idx]
+
         noise_embedding = embed_module(block_ids)
         input_embeds = noise_embedding.view(-1, noise_embedding.shape[-1])
 
@@ -563,13 +602,31 @@ class DFlashWorker:
             allocator.restore_state(token_to_kv_pool_state_backup)
 
         draft_hidden = draft_hidden.view(bs, self.block_size, -1)
-        draft_next = self._greedy_sample_from_vocab_parallel_head(
-            hidden_states=draft_hidden[:, 1:, :].reshape(-1, draft_hidden.shape[-1]),
-            lm_head=lm_head,
-        ).view(bs, self.block_size - 1)
+        draft_hidden_flat = draft_hidden[:, 1:, :].reshape(-1, draft_hidden.shape[-1])
+
+        if self.recycle_enabled:
+            draft_next, draft_confidences = self._greedy_sample_with_confidence(
+                hidden_states=draft_hidden_flat,
+                lm_head=lm_head,
+            )
+            draft_next = draft_next.view(bs, self.block_size - 1)
+            draft_confidences = draft_confidences.view(bs, self.block_size - 1)
+        else:
+            draft_next = self._greedy_sample_from_vocab_parallel_head(
+                hidden_states=draft_hidden_flat,
+                lm_head=lm_head,
+            ).view(bs, self.block_size - 1)
+            draft_confidences = None
+
         draft_tokens = self._draft_block_tokens_buf[:bs]
         draft_tokens[:, 0].copy_(block_ids[:, 0])
         draft_tokens[:, 1:].copy_(draft_next)
+
+        # Store recycle state for the next iteration.
+        if self.recycle_enabled:
+            draft_input.prev_draft_tokens = draft_tokens.clone()
+            draft_input.prev_confidences = draft_confidences
+
         positions = positions_2d.reshape(-1)
 
         verify_input = DFlashVerifyInput(
@@ -767,6 +824,155 @@ class DFlashWorker:
             out_token_ids[start:end].copy_(selected_ids.view(-1))
 
         return out_token_ids
+
+    def _greedy_sample_with_confidence(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        lm_head,
+        chunk_size: int = 256,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Greedy argmax + max softmax probability in a TP-safe way.
+
+        Returns:
+            token_ids: int64 tensor [num_tokens]
+            confidences: float32 tensor [num_tokens] (max softmax probability per position)
+        """
+        if hidden_states.numel() == 0:
+            empty_ids = torch.empty((0,), dtype=torch.long, device=hidden_states.device)
+            empty_conf = torch.empty(
+                (0,), dtype=torch.float32, device=hidden_states.device
+            )
+            return empty_ids, empty_conf
+
+        tp_group = get_tp_group()
+        tp_size = int(tp_group.world_size)
+
+        shard = lm_head.shard_indices
+        weight = lm_head.weight
+        weight_dtype = weight.dtype
+
+        num_org = int(shard.num_org_elements)
+        num_org_padded = int(shard.num_org_elements_padded)
+        num_added = int(shard.num_added_elements)
+        org_vocab_start = int(shard.org_vocab_start_index)
+        added_vocab_start = int(shard.added_vocab_start_index)
+
+        num_tokens = int(hidden_states.shape[0])
+        out_token_ids = torch.empty(
+            (num_tokens,), dtype=torch.long, device=hidden_states.device
+        )
+        out_confidences = torch.empty(
+            (num_tokens,), dtype=torch.float32, device=hidden_states.device
+        )
+
+        def _cast_hs(x: torch.Tensor) -> torch.Tensor:
+            return x if x.dtype == weight_dtype else x.to(weight_dtype)
+
+        for start in range(0, num_tokens, int(chunk_size)):
+            end = min(num_tokens, start + int(chunk_size))
+            hs = _cast_hs(hidden_states[start:end])
+
+            # Compute local logits over base + added vocab.
+            if num_org > 0:
+                local_logits = torch.matmul(hs, weight[:num_org].T)
+            else:
+                local_logits = torch.empty(
+                    (hs.shape[0], 0), dtype=weight_dtype, device=hs.device
+                )
+            if num_added > 0:
+                added_logits = torch.matmul(
+                    hs, weight[num_org_padded : num_org_padded + num_added].T
+                )
+                local_logits = torch.cat([local_logits, added_logits], dim=-1)
+
+            if tp_size == 1:
+                # Single rank: straightforward softmax confidence.
+                probs = torch.softmax(local_logits.float(), dim=-1)
+                max_prob, local_arg = probs.max(dim=-1)
+                out_confidences[start:end] = max_prob
+
+                # Convert local argmax to global token ids.
+                if num_added == 0:
+                    out_token_ids[start:end] = local_arg.to(torch.long) + org_vocab_start
+                else:
+                    is_base = local_arg < num_org
+                    global_ids = torch.empty_like(local_arg, dtype=torch.long)
+                    global_ids[is_base] = org_vocab_start + local_arg[is_base]
+                    global_ids[~is_base] = added_vocab_start + (
+                        local_arg[~is_base] - num_org
+                    )
+                    out_token_ids[start:end] = global_ids
+            else:
+                # TP>1: distributed log-sum-exp for confidence.
+                local_logits_f = local_logits.float()
+                local_max_val, local_arg = local_logits_f.max(dim=-1)
+                local_logsumexp = torch.logsumexp(local_logits_f, dim=-1)
+
+                # All-reduce to get global max logit (for stable softmax).
+                global_max_val = local_max_val.clone()
+                tp_group.all_reduce(global_max_val, op=torch.distributed.ReduceOp.MAX)
+
+                # Compute global logsumexp using the log-sum-exp trick:
+                # global_lse = global_max + log(sum_r(exp(local_lse_r - global_max)))
+                shifted_lse = torch.exp(local_logsumexp - global_max_val)
+                tp_group.all_reduce(shifted_lse, op=torch.distributed.ReduceOp.SUM)
+                global_logsumexp = global_max_val + torch.log(shifted_lse)
+
+                # confidence = exp(max_logit - logsumexp)
+                out_confidences[start:end] = torch.exp(
+                    global_max_val - global_logsumexp
+                ).clamp_(0.0, 1.0)
+
+                # For token IDs, reuse the existing greedy method logic.
+                # Convert local argmax to global token ids.
+                if num_added == 0:
+                    local_arg.add_(org_vocab_start)
+                    global_ids = local_arg.to(torch.long)
+                else:
+                    global_ids = torch.empty(
+                        (hs.shape[0],), dtype=torch.int64, device=hs.device
+                    )
+                    is_base = local_arg < num_org
+                    global_ids[is_base] = org_vocab_start + local_arg[is_base]
+                    global_ids[~is_base] = added_vocab_start + (
+                        local_arg[~is_base] - num_org
+                    )
+
+                # Gather per-rank maxima and select global winner for token IDs.
+                chunk_len = int(hs.shape[0])
+                needed = tp_size * chunk_len
+                if (
+                    self._draft_greedy_gather_cap < needed
+                    or self._draft_greedy_gathered_max_buf is None
+                    or self._draft_greedy_gathered_ids_buf is None
+                ):
+                    cap = tp_size * max(chunk_len, int(chunk_size))
+                    self._draft_greedy_gathered_max_buf = torch.empty(
+                        (cap,), dtype=local_max_val.dtype, device=hs.device
+                    )
+                    self._draft_greedy_gathered_ids_buf = torch.empty(
+                        (cap,), dtype=global_ids.dtype, device=hs.device
+                    )
+                    self._draft_greedy_gather_cap = cap
+
+                gathered_max = self._draft_greedy_gathered_max_buf[:needed]
+                gathered_ids = self._draft_greedy_gathered_ids_buf[:needed]
+                tp_group.all_gather_into_tensor(
+                    gathered_max, local_max_val.contiguous()
+                )
+                tp_group.all_gather_into_tensor(
+                    gathered_ids, global_ids.contiguous()
+                )
+                gathered_max = gathered_max.view(tp_size, chunk_len)
+                gathered_ids = gathered_ids.view(tp_size, chunk_len)
+                best_rank = torch.argmax(gathered_max, dim=0)
+                selected_ids = gathered_ids.gather(
+                    0, best_rank.unsqueeze(0)
+                ).squeeze(0)
+                out_token_ids[start:end].copy_(selected_ids)
+
+        return out_token_ids, out_confidences
 
     def _append_target_hidden_to_draft_kv(
         self,
@@ -1100,6 +1306,13 @@ class DFlashWorker:
         draft_input.verified_id = new_verified_id
         draft_input.target_hidden = next_target_hidden
         draft_input.ctx_lens = commit_lens
+
+        # Store accept length for recycle in the next iteration.
+        if self.recycle_enabled:
+            draft_input.prev_accept_len = torch.tensor(
+                accept_length_per_req_cpu, dtype=torch.long, device=self.device
+            )
+
         self._append_target_hidden_to_draft_kv(batch, draft_input)
         batch.spec_info = draft_input
         batch.forward_mode = ForwardMode.DECODE

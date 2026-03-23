@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -80,6 +80,14 @@ class DFlashDraftInput(SpecInput):
     # The next draft step appends ctx_lens[i] tokens starting at draft_seq_lens[i].
     draft_seq_lens: torch.Tensor
 
+    # --- Recycle state (carried across decode iterations) ---
+    # [bs, block_size] previous round's full draft tokens (position 0 = anchor).
+    prev_draft_tokens: Optional[torch.Tensor] = field(default=None, repr=False)
+    # [bs, block_size-1] max softmax probability for positions 1..block_size-1.
+    prev_confidences: Optional[torch.Tensor] = field(default=None, repr=False)
+    # [bs] previous round's accept_length (cumprod-based consecutive match count).
+    prev_accept_len: Optional[torch.Tensor] = field(default=None, repr=False)
+
     def __post_init__(self):
         super().__init__(spec_input_type=SpecInputType.DFLASH_DRAFT)
 
@@ -94,6 +102,14 @@ class DFlashDraftInput(SpecInput):
         self.verified_id = self.verified_id[new_indices]
         self.ctx_lens = old_ctx_lens[new_indices]
         self.draft_seq_lens = self.draft_seq_lens[new_indices]
+
+        # Recycle state: simple 2D indexing (or keep None).
+        if self.prev_draft_tokens is not None:
+            self.prev_draft_tokens = self.prev_draft_tokens[new_indices]
+        if self.prev_confidences is not None:
+            self.prev_confidences = self.prev_confidences[new_indices]
+        if self.prev_accept_len is not None:
+            self.prev_accept_len = self.prev_accept_len[new_indices]
 
         if old_target_hidden is None or old_target_hidden.numel() == 0:
             self.target_hidden = old_target_hidden
@@ -141,6 +157,16 @@ class DFlashDraftInput(SpecInput):
             self.target_hidden = torch.cat(
                 [self.target_hidden, spec_info.target_hidden], dim=0
             )
+
+        # Recycle state: if either side is None, the merged result is None
+        # (first decode iteration after prefill has no recycle state).
+        for attr in ("prev_draft_tokens", "prev_confidences", "prev_accept_len"):
+            a = getattr(self, attr)
+            b = getattr(spec_info, attr)
+            if a is not None and b is not None:
+                setattr(self, attr, torch.cat([a, b], dim=0))
+            else:
+                setattr(self, attr, None)
 
 
 @dataclass

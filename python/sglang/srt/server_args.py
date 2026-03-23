@@ -486,6 +486,8 @@ class ServerArgs:
     speculative_num_draft_tokens: Optional[int] = None
     speculative_dflash_block_size: Optional[int] = None
     speculative_dflash_draft_window_size: Optional[int] = None
+    speculative_dflash_recycle: bool = False
+    speculative_dflash_recycle_confidence: float = 0.8
     speculative_accept_threshold_single: float = 1.0
     speculative_accept_threshold_acc: float = 1.0
     speculative_token_map: Optional[str] = None
@@ -4503,6 +4505,20 @@ class ServerArgs:
             "Draft model only attends to the most recent W target tokens. "
             "None (default) means full context (no window).",
             default=ServerArgs.speculative_dflash_draft_window_size,
+        )
+        parser.add_argument(
+            "--speculative-dflash-recycle",
+            action="store_true",
+            help="DFLASH only. Enable recycling high-confidence draft tokens from the "
+            "previous round into the next draft block (requires a recycle-trained model).",
+            default=ServerArgs.speculative_dflash_recycle,
+        )
+        parser.add_argument(
+            "--speculative-dflash-recycle-confidence",
+            type=float,
+            help="DFLASH only. Confidence threshold for recycling draft tokens. "
+            "Tokens with max softmax probability above this threshold are recycled.",
+            default=ServerArgs.speculative_dflash_recycle_confidence,
         )
         parser.add_argument(
             "--speculative-accept-threshold-single",
