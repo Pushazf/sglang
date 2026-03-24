@@ -91,6 +91,9 @@ class SpeculativeDecodingMetricsMixin:
     # Empty list [] when speculative decoding is disabled.
     spec_acceptance_histogram: List[List[int]]
 
+    # Post-reject confidence histogram: 10 bins [0.0,0.1)...[0.9,1.0] per request.
+    spec_post_reject_confidence_hist: List[List[int]]
+
 
 # Parameters for a session
 @dataclass

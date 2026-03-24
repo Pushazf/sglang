@@ -182,6 +182,7 @@ class DFlashWorker:
         # Recycle configuration.
         self.recycle_enabled = server_args.speculative_dflash_recycle
         self.confidence_threshold = server_args.speculative_dflash_recycle_confidence
+        self.post_reject_confidence_enabled = server_args.speculative_dflash_post_reject_confidence
         if self.recycle_enabled and self.tp_rank == 0:
             logger.info(
                 "DFLASH recycle enabled. confidence_threshold=%.3f",
@@ -604,7 +605,9 @@ class DFlashWorker:
         draft_hidden = draft_hidden.view(bs, self.block_size, -1)
         draft_hidden_flat = draft_hidden[:, 1:, :].reshape(-1, draft_hidden.shape[-1])
 
-        if self.recycle_enabled:
+        need_confidence = self.recycle_enabled or self.post_reject_confidence_enabled
+
+        if need_confidence:
             draft_next, draft_confidences = self._greedy_sample_with_confidence(
                 hidden_states=draft_hidden_flat,
                 lm_head=lm_head,
@@ -633,6 +636,7 @@ class DFlashWorker:
             draft_token=draft_tokens.reshape(-1),
             positions=positions,
             draft_token_num=self.block_size,
+            draft_confidences=draft_confidences if self.post_reject_confidence_enabled else None,
         )
         _, build_custom_mask = resolve_dflash_verify_mask_policy(
             self.model_runner.attn_backend

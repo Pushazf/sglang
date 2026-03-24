@@ -1903,6 +1903,17 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     i
                 ]
 
+            # Post-reject confidence histogram
+            if (
+                hasattr(recv_obj, "spec_post_reject_confidence_hist")
+                and recv_obj.spec_post_reject_confidence_hist
+                and len(recv_obj.spec_post_reject_confidence_hist) > i
+                and any(v > 0 for v in recv_obj.spec_post_reject_confidence_hist[i])
+            ):
+                meta_info["spec_post_reject_confidence_hist"] = (
+                    recv_obj.spec_post_reject_confidence_hist[i]
+                )
+
     def _request_has_grammar(self, obj: GenerateReqInput) -> bool:
         return (
             obj.sampling_params.get("json_schema", None)

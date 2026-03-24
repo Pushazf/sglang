@@ -197,6 +197,10 @@ class DFlashVerifyInput(SpecInput):
     # instead of from column 0, so draft attention only covers the recent window.
     kv_start_idx: torch.Tensor | None = None
 
+    # Draft token confidences for post-reject confidence tracking.
+    # [bs, block_size-1] max softmax probability per draft position.
+    draft_confidences: torch.Tensor | None = None
+
     def __post_init__(self):
         super().__init__(spec_input_type=SpecInputType.DFLASH_VERIFY)
         if self.num_tokens_per_batch == -1:
@@ -502,6 +506,18 @@ class DFlashVerifyInput(SpecInput):
             accept_length_per_req_cpu.append(max(0, appended - 1))
             req.spec_verify_ct += 1
             req.spec_accepted_tokens += accept_length_per_req_cpu[-1]
+
+            # Post-reject confidence binning
+            if self.draft_confidences is not None:
+                acc_len = accept_length_per_req_cpu[-1]
+                max_draft = self.draft_token_num - 1  # block_size - 1
+                if acc_len < max_draft - 1:  # tokens exist after the first reject
+                    confs = self.draft_confidences[i, acc_len + 1:]
+                    for c in confs.tolist():
+                        if c != c:  # NaN check
+                            continue
+                        bin_idx = min(int(c * 10), 9)  # [0.9, 1.0] closed
+                        req.spec_post_reject_confidence_hist[bin_idx] += 1
 
         commit_lens = torch.tensor(commit_lens_cpu, dtype=torch.int32, device=device)
         new_verified_id = torch.tensor(

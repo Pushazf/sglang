@@ -754,6 +754,10 @@ class Req(ReqDllmMixin):
         # Example: histogram[0] = 5 means 5 steps with 0 accepted tokens, histogram[3] = 10 means 10 steps with 3 accepted tokens.
         self.spec_acceptance_histogram: List[int] = []
 
+        # Post-reject confidence histogram for speculative decoding.
+        # 10 bins: [0.0,0.1), [0.1,0.2), ..., [0.9,1.0]
+        self.spec_post_reject_confidence_hist: List[int] = [0] * 10
+
         # The number of times this request has been retracted / preempted.
         self.retraction_count = 0
         self.retraction_mb_id = None

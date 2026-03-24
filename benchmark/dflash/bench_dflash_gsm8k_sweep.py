@@ -129,6 +129,7 @@ class BenchMetrics:
     invalid_rate: Optional[float]
     spec_accept_length: Optional[float]
     spec_verify_ct_sum: int
+    post_reject_confidence_hist: Optional[list[int]] = None
 
 
 def _run_gsm8k_requests(
@@ -152,6 +153,7 @@ def _run_gsm8k_requests(
     total_tokens = 0
     spec_verify_ct_sum = 0
     spec_accept_lengths: list[float] = []
+    post_reject_hists: list[list[int]] = []
     correct = 0
     invalid = 0
 
@@ -165,6 +167,8 @@ def _run_gsm8k_requests(
                 spec_accept_lengths.append(float(meta["spec_accept_length"]))
             except (TypeError, ValueError):
                 pass
+        if "spec_post_reject_confidence_hist" in meta:
+            post_reject_hists.append(meta["spec_post_reject_confidence_hist"])
 
         if label is not None:
             pred = _get_answer_value(out.get("text", ""))
@@ -240,6 +244,13 @@ def _run_gsm8k_requests(
         acc = correct / max(len(prompts), 1)
         invalid_rate = invalid / max(len(prompts), 1)
 
+    merged_hist: Optional[list[int]] = None
+    if post_reject_hists:
+        merged_hist = [0] * 10
+        for h in post_reject_hists:
+            for j, v in enumerate(h):
+                merged_hist[j] += v
+
     return BenchMetrics(
         latency_s=float(latency),
         output_tokens=int(total_tokens),
@@ -248,6 +259,7 @@ def _run_gsm8k_requests(
         invalid_rate=invalid_rate,
         spec_accept_length=spec_accept_length,
         spec_verify_ct_sum=int(spec_verify_ct_sum),
+        post_reject_confidence_hist=merged_hist,
     )
 
 
@@ -337,6 +349,11 @@ def _build_mode_runs(
                         str(args.speculative_dflash_recycle_confidence),
                     ]
                     if args.speculative_dflash_recycle
+                    else []
+                ),
+                *(
+                    ["--speculative-dflash-post-reject-confidence"]
+                    if getattr(args, "post_reject_confidence", False)
                     else []
                 ),
             ],
@@ -591,6 +608,35 @@ def _print_summary(
             )
             md_lines.append("")
 
+        # Post-reject confidence histogram (aggregate across all configs for this backend)
+        if getattr(args, "post_reject_confidence", False):
+            merged = [0] * 10
+            for key, metrics in results.items():
+                b, tp, conc, mode = key
+                if b == backend and mode == "dflash" and metrics.post_reject_confidence_hist:
+                    for j, v in enumerate(metrics.post_reject_confidence_hist):
+                        merged[j] += v
+            total = sum(merged)
+            if total > 0:
+                print(f"\nPost-Reject Token Confidence Distribution (total: {total}):")
+                print(f"  {'Confidence Range':>20}  {'Count':>10}  {'Ratio':>10}")
+                md_lines.append("### Post-Reject Token Confidence Distribution")
+                md_lines.append("")
+                md_lines.append(f"Total: {total}")
+                md_lines.append("")
+                md_lines.append("| Confidence Range | Count | Ratio |")
+                md_lines.append("|---|---|---|")
+                for i in range(10):
+                    lo = i * 0.1
+                    hi = (i + 1) * 0.1
+                    bracket = "]" if i == 9 else ")"
+                    range_str = f"[{lo:.1f}, {hi:.1f}{bracket}"
+                    count = merged[i]
+                    ratio = count / total * 100
+                    print(f"  {range_str:>20}  {count:>10}  {ratio:>9.1f}%")
+                    md_lines.append(f"| {range_str} | {count} | {ratio:.1f}% |")
+                md_lines.append("")
+
     if args.output_md:
         output_dir = os.path.dirname(args.output_md)
         if output_dir:
@@ -679,6 +725,11 @@ def parse_args() -> argparse.Namespace:
         "--output-md",
         default=None,
         help="Path to write a markdown report. If unset, no file is written.",
+    )
+    parser.add_argument(
+        "--post-reject-confidence",
+        action="store_true",
+        help="Collect and display post-reject draft token confidence distribution.",
     )
     return parser.parse_args()
 

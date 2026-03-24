@@ -488,6 +488,7 @@ class ServerArgs:
     speculative_dflash_draft_window_size: Optional[int] = None
     speculative_dflash_recycle: bool = False
     speculative_dflash_recycle_confidence: float = 0.8
+    speculative_dflash_post_reject_confidence: bool = False
     speculative_accept_threshold_single: float = 1.0
     speculative_accept_threshold_acc: float = 1.0
     speculative_token_map: Optional[str] = None
@@ -4519,6 +4520,13 @@ class ServerArgs:
             help="DFLASH only. Confidence threshold for recycling draft tokens. "
             "Tokens with max softmax probability above this threshold are recycled.",
             default=ServerArgs.speculative_dflash_recycle_confidence,
+        )
+        parser.add_argument(
+            "--speculative-dflash-post-reject-confidence",
+            action="store_true",
+            help="DFLASH only. Track confidence distribution of draft tokens after "
+            "the first rejected position in each verification step.",
+            default=ServerArgs.speculative_dflash_post_reject_confidence,
         )
         parser.add_argument(
             "--speculative-accept-threshold-single",
